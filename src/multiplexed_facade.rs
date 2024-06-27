@@ -7,7 +7,7 @@ use core::marker::PhantomData;
 use std::time::Duration;
 
 #[derive(Clone)]
-struct RedisConnection(redis::aio::MultiplexedConnection);
+struct RedisConnection(redis::aio::ConnectionManager);
 
 impl std::fmt::Debug for RedisConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -18,7 +18,7 @@ impl std::fmt::Debug for RedisConnection {
 #[derive(Debug, Clone)]
 pub struct Rsmq {
     connection: RedisConnection,
-    functions: RsmqFunctions<redis::aio::MultiplexedConnection>,
+    functions: RsmqFunctions<redis::aio::ConnectionManager>,
 }
 
 impl Rsmq {
@@ -35,7 +35,7 @@ impl Rsmq {
 
         let client = redis::Client::open(conn_info)?;
 
-        let connection = client.get_multiplexed_async_connection().await?;
+        let connection = client.get_connection_manager().await?;
 
         Ok(Rsmq::new_with_connection(
             connection,
@@ -46,7 +46,7 @@ impl Rsmq {
 
     /// Special method for when you already have a redis-rs connection and you don't want redis_async to create a new one.
     pub fn new_with_connection(
-        connection: redis::aio::MultiplexedConnection,
+        connection: redis::aio::ConnectionManager,
         realtime: bool,
         ns: Option<&str>,
     ) -> Rsmq {

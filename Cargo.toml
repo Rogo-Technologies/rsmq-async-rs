@@ -18,7 +18,7 @@ rand = "^0.8"
 radix_fmt = "^1"
 bb8 = "^0.8"
 thiserror = "^1"
-redis = { version = "^0.25", default-features = false, features = ["acl", "keep-alive", "script"] }
+redis = { version = "^0.25", default-features = false, features = ["acl", "keep-alive", "script", "connection-manager"] }
 async-trait = "^0.1"
 tokio = { version = "^1", optional = true}
 

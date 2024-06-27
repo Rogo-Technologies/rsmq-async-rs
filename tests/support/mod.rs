@@ -116,7 +116,7 @@ impl TestContext {
         TestContext { server, client }
     }
 
-    pub async fn async_connection(&self) -> redis::RedisResult<redis::aio::MultiplexedConnection> {
-        self.client.get_multiplexed_async_connection().await
+    pub async fn async_connection(&self) -> redis::RedisResult<redis::aio::ConnectionManager> {
+        self.client.get_connection_manager().await
     }
 }

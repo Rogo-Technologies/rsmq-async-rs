@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone)]
-struct RedisConnection(redis::aio::MultiplexedConnection);
+struct RedisConnection(redis::aio::ConnectionManager);
 
 impl std::fmt::Debug for RedisConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -21,7 +21,7 @@ impl std::fmt::Debug for RedisConnection {
 #[derive(Debug, Clone)]
 pub struct RsmqSync {
     connection: RedisConnection,
-    functions: RsmqFunctions<redis::aio::MultiplexedConnection>,
+    functions: RsmqFunctions<redis::aio::ConnectionManager>,
     runner: Arc<Runtime>,
 }
 
@@ -44,8 +44,7 @@ impl RsmqSync {
 
         let client = redis::Client::open(conn_info)?;
 
-        let connection =
-            runner.block_on(async move { client.get_multiplexed_async_connection().await })?;
+        let connection = runner.block_on(async move { client.get_connection_manager().await })?;
 
         Ok(RsmqSync {
             connection: RedisConnection(connection),

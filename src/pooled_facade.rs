@@ -22,17 +22,14 @@ impl RedisConnectionManager {
 
 #[async_trait]
 impl bb8::ManageConnection for RedisConnectionManager {
-    type Connection = redis::aio::MultiplexedConnection;
+    type Connection = redis::aio::ConnectionManager;
     type Error = RedisError;
 
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {
-        self.client.get_multiplexed_async_connection().await
+        self.client.get_connection_manager().await
     }
 
-    async fn is_valid(
-        &self,
-        conn: &mut redis::aio::MultiplexedConnection,
-    ) -> Result<(), Self::Error> {
+    async fn is_valid(&self, conn: &mut redis::aio::ConnectionManager) -> Result<(), Self::Error> {
         redis::cmd("PING").query_async(conn).await
     }
 
@@ -49,7 +46,7 @@ pub struct PoolOptions {
 
 pub struct PooledRsmq {
     pool: bb8::Pool<RedisConnectionManager>,
-    functions: RsmqFunctions<redis::aio::MultiplexedConnection>,
+    functions: RsmqFunctions<redis::aio::ConnectionManager>,
 }
 
 impl Clone for PooledRsmq {
