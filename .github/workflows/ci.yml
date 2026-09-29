@@ -8,37 +8,37 @@ on:
     branches:
       - master
 
+# Least privilege: the job only needs to check out code and run the test suite. The
+# default `GITHUB_TOKEN` scope is broader, so pin it down explicitly.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
+    # actions/checkout@v1 is built on a Node runtime that GitHub has retired; it no
+    # longer receives security fixes. actions-rs/toolchain and actions-rs/cargo are
+    # likewise unmaintained (the actions-rs org is archived), so both are replaced
+    # with the first-party actions below.
     - name: Git checkout
-      uses: actions/checkout@v1
-    
+      uses: actions/checkout@v4
+
     - name: Install Redis server
       run: sudo apt install redis-server
 
     - name: Install Rust toolchain
-      uses: actions-rs/toolchain@v1
+      uses: dtolnay/rust-toolchain@stable
       with:
         profile: minimal
-        toolchain: stable
         components: rustfmt, clippy
-        override: true
 
     - name: Cargo Build
-      uses: actions-rs/cargo@v1
-      with:
-        command: build
+      run: cargo build
 
     - name: Cargo Fmt Check
-      uses: actions-rs/cargo@v1
-      with:
-        command: fmt
-        args: --all -- --check
+      run: cargo fmt --all -- --check
 
     - name: Cargo Test
-      uses: actions-rs/cargo@v1
-      with:
-        command: test
+      run: cargo test

@@ -167,6 +167,15 @@ impl<T: ConnectionLike> RsmqFunctions<T> {
 
     /// Deletes the queue and all the messages on it
     pub async fn delete_queue(&self, conn: &mut T, qname: &str) -> RsmqResult<()> {
+        // Validate the name before using it to build Redis keys. This is the
+        // destructive path -- the commands below issue `DEL` on `<ns>:<qname>:Q` and
+        // `<ns>:<qname>` -- so a name containing ':' could be crafted to construct a
+        // key outside the intended namespace and delete an unrelated queue.
+        // `create_queue` already validated on the way in, but a name can also arrive
+        // from a config file or a deserialized job payload, and `delete_queue` was
+        // previously the one mutating method with no check at all.
+        valid_name_format(qname)?;
+
         let key = format!("{}:{}", self.ns, qname);
 
         let results: (u16, u16) = pipe()
@@ -281,7 +290,7 @@ impl<T: ConnectionLike> RsmqFunctions<T> {
             message,
             rc: result.3,
             fr: result.4,
-            sent: u64::from_str_radix(&result.1[0..10], 36).unwrap_or(0),
+            sent: parse_sent_timestamp(&result.1),
         }))
     }
 
@@ -317,7 +326,7 @@ impl<T: ConnectionLike> RsmqFunctions<T> {
             message,
             rc: result.3,
             fr: result.4,
-            sent: u64::from_str_radix(&result.1[0..10], 36).unwrap_or(0),
+            sent: parse_sent_timestamp(&result.1),
         }))
     }
 
@@ -519,6 +528,33 @@ impl<T: ConnectionLike> RsmqFunctions<T> {
     }
 }
 
+/// Number of leading base-36 characters in a message id that encode the send
+/// timestamp.
+///
+/// Ids are produced by `send_message` as `radix_36(time_millis) + make_id(22)`, so the
+/// prefix is variable-length: a present-day millisecond timestamp encodes to about 8
+/// base-36 characters, growing slowly (it reaches 9 characters some time after 2050).
+/// This bound is generous enough to cover the whole prefix for any realistic id while
+/// still slicing a fixed, small window.
+const SENT_PREFIX_LEN: usize = 10;
+
+/// Extract the `sent` timestamp from a message id, returning `0` if it cannot be read.
+///
+/// The id arrives from Redis as an untrusted string -- any client able to write to the
+/// queue's hash, or an older/foreign rsmq implementation sharing the namespace, can put
+/// arbitrary bytes there. The previous inline `&result.1[0..10]` was an unconditional
+/// byte-range slice, which panics when the id is shorter than 10 bytes
+/// (`byte index 10 is out of bounds`) and can also slice a multi-byte UTF-8 sequence in
+/// half. A panic inside a library call takes down the caller's task, turning corrupt
+/// data into a denial of service.
+///
+/// Taking the first `min(len, SENT_PREFIX_LEN)` bytes keeps the parse total, and the
+/// `unwrap_or(0)` then degrades a malformed prefix to a `sent` of zero.
+fn parse_sent_timestamp(id: &str) -> u64 {
+    let prefix_len = std::cmp::min(id.len(), SENT_PREFIX_LEN);
+    u64::from_str_radix(&id[..prefix_len], 36).unwrap_or(0)
+}
+
 fn number_in_range<T: std::cmp::PartialOrd + std::fmt::Display>(
     value: T,
     min: T,
@@ -535,15 +571,113 @@ fn number_in_range<T: std::cmp::PartialOrd + std::fmt::Display>(
     }
 }
 
+/// Maximum accepted queue-name length, in bytes.
+///
+/// Queue names become part of Redis keys (`<ns>:<qname>`) and are stored in a hash
+/// alongside message bodies, so an unbounded name lets a caller inflate key size and
+/// memory pressure for no benefit. 160 is comfortably above any realistic name.
+const MAX_QUEUE_NAME_LEN: usize = 160;
+
 fn valid_name_format(name: &str) -> RsmqResult<()> {
-    if name.is_empty() && name.len() > 160 {
+    // Reject an empty name: it would produce the key "<ns>:" and collide with other
+    // malformed names that also collapse to the same trailing-colon form.
+    if name.is_empty() {
         return Err(RsmqError::InvalidFormat(name.to_string()));
-    } else {
-        name.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     }
 
-    Ok(())
+    // Reject over-long names before the length check on the character class, so an
+    // oversized name is reported as such rather than as a format error.
+    if name.len() > MAX_QUEUE_NAME_LEN {
+        return Err(RsmqError::InvalidFormat(name.to_string()));
+    }
+
+    // Allow only the character set that is safe to embed in a Redis key and cannot
+    // escape the `<ns>:<qname>` namespace. Previously this predicate was computed and
+    // then discarded, so *every* name was accepted: `all()`'s bool result was never
+    // bound or returned, and the function fell through to `Ok(())` unconditionally.
+    // That let a caller pass names containing ':' (colliding with the namespace
+    // separator), whitespace, or arbitrary bytes straight into key construction.
+    let is_valid = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+
+    if is_valid {
+        Ok(())
+    } else {
+        Err(RsmqError::InvalidFormat(name.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_name_format_accepts_ordinary_names() {
+        assert!(valid_name_format("orders").is_ok());
+        assert!(valid_name_format("order-queue_2").is_ok());
+        // A 160-byte name is the documented upper bound and must be accepted.
+        let max_len = "a".repeat(MAX_QUEUE_NAME_LEN);
+        assert!(valid_name_format(&max_len).is_ok());
+    }
+
+    #[test]
+    fn valid_name_format_rejects_empty_name() {
+        assert!(valid_name_format("").is_err());
+    }
+
+    #[test]
+    fn valid_name_format_rejects_over_long_name() {
+        let too_long = "a".repeat(MAX_QUEUE_NAME_LEN + 1);
+        assert!(valid_name_format(&too_long).is_err());
+    }
+
+    #[test]
+    fn valid_name_format_rejects_namespace_separator() {
+        // A ':' in the name would let a caller construct a key outside the intended
+        // `<ns>:<qname>` namespace, which matters most on the destructive paths.
+        assert!(valid_name_format("other:queue").is_err());
+    }
+
+    #[test]
+    fn valid_name_format_rejects_whitespace_and_punctuation() {
+        assert!(valid_name_format("has space").is_err());
+        assert!(valid_name_format("quote'\"injection").is_err());
+        assert!(valid_name_format("star*").is_err());
+    }
+
+    #[test]
+    fn parse_sent_timestamp_handles_short_id_without_panicking() {
+        // The old implementation did `&id[0..10]` unconditionally and panicked with
+        // "byte index 10 is out of bounds" for any id shorter than 10 bytes.
+        assert_eq!(parse_sent_timestamp(""), 0);
+        assert_eq!(parse_sent_timestamp("a"), 10);
+        assert_eq!(parse_sent_timestamp("abc"), 13_368);
+    }
+
+    #[test]
+    fn parse_sent_timestamp_uses_ten_char_prefix() {
+        // "abcdefghij" is 10 base-36 digits; the parse must stop at the prefix length.
+        let expected = u64::from_str_radix("abcdefghij", 36).unwrap();
+        assert_eq!(parse_sent_timestamp("abcdefghij"), expected);
+        // Trailing random characters must not change the parsed value.
+        assert_eq!(parse_sent_timestamp("abcdefghijZZZZZZZZZZ"), expected);
+    }
+
+    #[test]
+    fn parse_sent_timestamp_degrades_gracefully_on_garbage() {
+        // A non-base-36 prefix yields 0 rather than panicking.
+        assert_eq!(parse_sent_timestamp("!!!!!!!!!!"), 0);
+        assert_eq!(parse_sent_timestamp("short"), 0);
+    }
+
+    #[test]
+    fn parse_sent_timestamp_does_not_panic_on_multibyte_id() {
+        // Slicing a UTF-8 sequence at a fixed offset can land mid-character. The
+        // length-clamped slice must not panic even for short multibyte input.
+        let multibyte = "ååå";
+        assert_eq!(parse_sent_timestamp(multibyte), 0);
+    }
 }
 
 fn get_redis_duration(d: Option<Duration>, default: &Duration) -> u64 {
